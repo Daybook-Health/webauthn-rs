@@ -40,9 +40,17 @@ der-parser = "10.0"
 uuid = { workspace = true, features = ["serde"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-web-time.workspace = true
+js-sys.workspace = true
 
 [dev-dependencies]
 hex-literal = "1.1"
 tracing-subscriber.workspace = true
 webauthn-rs-device-catalog.workspace = true
+
+# The tests on wasm32-unknown-unknown, under Node (src/time.rs). A program
+# that links this crate for wasm32 picks its own randomness backend; the
+# tests take crypto.getRandomValues, as a Worker or a browser does.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test.workspace = true
+getrandom = { version = "0.4", features = ["wasm_js"] }
+uuid = { workspace = true, features = ["js"] }
