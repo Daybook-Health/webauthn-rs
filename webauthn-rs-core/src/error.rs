@@ -301,6 +301,9 @@ pub enum WebauthnError {
 
     #[error("The RSA parameters provided are invalid")]
     RsaParametersInvalid,
+
+    #[error("The system clock could not be read, or read a time before 2025")]
+    ClockUnavailable,
 }
 
 impl PartialEq for WebauthnError {
