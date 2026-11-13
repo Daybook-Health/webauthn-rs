@@ -396,7 +396,6 @@ impl WebauthnCore {
             allow_synchronised_authenticators,
         } = state;
         let chal: ChallengeRef = challenge;
-        let current_time = crate::time::now()?;
 
         // send to register_credential_internal
         let credential = self.register_credential_internal(
@@ -408,7 +407,11 @@ impl WebauthnCore {
             attestation_cas,
             extensions,
             *allow_synchronised_authenticators,
-            current_time,
+            // Read only where the time is used: checking the attestation
+            // chain against `attestation_cas`. A registration with no CA
+            // list never reads the clock, so a clock that cannot be read
+            // does not fail it.
+            crate::time::now,
         )?;
 
         // Check that the credentialId is not yet registered to any other user. If registration is
@@ -439,7 +442,7 @@ impl WebauthnCore {
         attestation_cas: Option<&AttestationCaList>,
         req_extn: &RequestRegistrationExtensions,
         allow_synchronised_authenticators: bool,
-        current_time: SystemTime,
+        current_time: impl FnOnce() -> Result<SystemTime, WebauthnError>,
     ) -> Result<Credential, WebauthnError> {
         // Internal management - if the attestation ca list is some, but is empty, we need to fail!
         if attestation_cas
@@ -670,8 +673,11 @@ impl WebauthnCore {
 
         let attested_ca_crt = if let Some(ca_list) = attestation_cas {
             // If given a set of ca's assert that our attestation actually matched one.
-            let ca_crt =
-                verify_attestation_ca_chain(&credential.attestation.data, ca_list, current_time)?;
+            let ca_crt = verify_attestation_ca_chain(
+                &credential.attestation.data,
+                ca_list,
+                current_time()?,
+            )?;
 
             // It may seem odd to unwrap the option and make this not verified at this point,
             // but in this case because we have the ca_list and none was the result (which happens)
@@ -1242,6 +1248,9 @@ impl WebauthnCore {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::panic)]
+    // Plain #[test]s, run on the host only: wasm-pack runs only
+    // wasm_bindgen_test functions, so std's clock is safe to read here.
+    #![allow(clippy::disallowed_methods)]
     use crate::constants::CHALLENGE_SIZE_BYTES;
     use crate::core::{CreationChallengeResponse, RegistrationState, WebauthnError};
     use crate::proto::*;
@@ -1263,9 +1272,9 @@ mod tests {
 
     // Test the crypto operations of the webauthn impl
 
-    #[test]
-    fn test_registration_yk() {
-        let _ = tracing_subscriber::fmt::try_init();
+    /// A Yubico 5's registration, its Webauthn and the zero challenge it
+    /// answered.
+    fn yk_registration() -> (Webauthn, RegisterPublicKeyCredential, Vec<u8>) {
         let wan = Webauthn::new_unsafe_experts_only(
             "http://127.0.0.1:8080/auth",
             "127.0.0.1",
@@ -1297,6 +1306,14 @@ mod tests {
         // turn it into our "deserialised struct"
         let rsp_d: RegisterPublicKeyCredential = serde_json::from_str(rsp).unwrap();
 
+        (wan, rsp_d, zero_chal)
+    }
+
+    #[test]
+    fn test_registration_yk() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let (wan, rsp_d, zero_chal) = yk_registration();
+
         // Now register, providing our fake challenge.
         let result = wan.register_credential_internal(
             &rsp_d,
@@ -1307,10 +1324,48 @@ mod tests {
             Some(&YUBICO_U2F_ROOT_CA_SERIAL_457200631_PEM.try_into().unwrap()),
             &RequestRegistrationExtensions::default(),
             true,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(result.is_ok());
+    }
+
+    /// The clock is read only to check the attestation chain against a CA
+    /// list: a registration with none never reads it, so a clock that cannot
+    /// be read does not fail it, and one with a list fails with
+    /// `ClockUnavailable` rather than checking against a wrong time.
+    #[test]
+    fn registration_reads_the_clock_only_for_a_ca_list() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let (wan, rsp_d, zero_chal) = yk_registration();
+        let no_clock =
+            || -> Result<SystemTime, WebauthnError> { Err(WebauthnError::ClockUnavailable) };
+
+        let without_cas = wan.register_credential_internal(
+            &rsp_d,
+            UserVerificationPolicy::Preferred,
+            &zero_chal,
+            &[],
+            &[COSEAlgorithm::ES256],
+            None,
+            &RequestRegistrationExtensions::default(),
+            true,
+            no_clock,
+        );
+        assert!(without_cas.is_ok(), "{without_cas:?}");
+
+        let with_cas = wan.register_credential_internal(
+            &rsp_d,
+            UserVerificationPolicy::Preferred,
+            &zero_chal,
+            &[],
+            &[COSEAlgorithm::ES256],
+            Some(&YUBICO_U2F_ROOT_CA_SERIAL_457200631_PEM.try_into().unwrap()),
+            &RequestRegistrationExtensions::default(),
+            true,
+            no_clock,
+        );
+        assert_eq!(with_cas.err(), Some(WebauthnError::ClockUnavailable));
     }
 
     // These are vectors from https://github.com/duo-labs/webauthn
@@ -1351,7 +1406,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             true,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(result.is_ok());
@@ -1395,7 +1450,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         debug!(?result);
         assert!(result.is_ok());
@@ -1440,7 +1495,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(result.is_ok());
@@ -1485,7 +1540,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(result.is_ok());
@@ -1530,7 +1585,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(matches!(
@@ -1822,7 +1877,7 @@ mod tests {
             Some(&AttestationCaList::default()),
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(matches!(
@@ -1840,7 +1895,7 @@ mod tests {
             Some(&(APPLE_WEBAUTHN_ROOT_CA_PEM.try_into().unwrap())),
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(matches!(
@@ -1870,7 +1925,7 @@ mod tests {
             Some(&att_ca_list),
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(matches!(
@@ -1898,7 +1953,7 @@ mod tests {
             Some(&att_ca_list),
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(result.is_ok());
@@ -1989,7 +2044,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             true,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(result.is_ok());
@@ -2362,7 +2417,7 @@ mod tests {
             ),
             &RequestRegistrationExtensions::default(),
             true,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         trace!("{:?}", result);
         assert!(matches!(
@@ -2569,7 +2624,7 @@ mod tests {
             // Don't allow passkeys
             false,
             // Must manually set the clock as submission is limited to 5 days.
-            SystemTime::UNIX_EPOCH + Duration::from_secs(DATE),
+            || Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(DATE)),
         );
         debug!("{:?}", result);
         assert!(matches!(
@@ -2599,7 +2654,7 @@ mod tests {
             // Don't allow passkeys
             false,
             // Must manually set the clock as submission is limited to 5 days.
-            SystemTime::UNIX_EPOCH + Duration::from_secs(DATE),
+            || Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(DATE)),
         );
         debug!("{:?}", result);
         assert!(result.is_ok());
@@ -2626,7 +2681,7 @@ mod tests {
             // Allow them.
             true,
             // Must manually set the clock as submission is limited to 5 days.
-            SystemTime::UNIX_EPOCH + Duration::from_secs(DATE),
+            || Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(DATE)),
         );
         debug!("{:?}", result);
         assert!(result.is_ok());
@@ -2766,7 +2821,7 @@ mod tests {
             &RequestRegistrationExtensions::default(),
             false,
             // Must manually set the clock as submission is limited to 5 days.
-            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            || Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
         );
         debug!("{:?}", result);
         assert!(matches!(
@@ -3046,7 +3101,7 @@ mod tests {
                 None,
                 &RequestRegistrationExtensions::default(),
                 true,
-                SystemTime::now(),
+                || Ok(SystemTime::now()),
             )
             .expect("Failed to register credential");
 
@@ -3140,7 +3195,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
 
         // temporarily disabled due to ed25519 support being absent.
@@ -3186,7 +3241,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
 
         // temporarily disabled due to ed25519 support being absent.
@@ -3232,7 +3287,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         debug!("{:?}", result);
         // Currently UNSUPPORTED as openssl doesn't have eddsa management utils that we need.
@@ -3276,7 +3331,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             true,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         debug!("{:?}", result);
         assert!(result.is_ok());
@@ -3323,7 +3378,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         debug!("{:?}", result);
         assert!(result.is_err());
@@ -3371,7 +3426,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             false,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         debug!("{:?}", result);
         assert!(matches!(result, Err(WebauthnError::ParseNOMFailure)));
@@ -3452,7 +3507,7 @@ mod tests {
             &RequestRegistrationExtensions::default(),
             true,
             // Must manually set the clock as submission is limited to 5 days.
-            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            || Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
         );
         debug!("{:?}", result);
         let cred = result.unwrap();
@@ -3526,7 +3581,7 @@ mod tests {
             Some(&(GOOGLE_SAFETYNET_CA_OLD.try_into().unwrap())),
             &RequestRegistrationExtensions::default(),
             true,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
         dbg!(&result);
         assert_eq!(result, Err(WebauthnError::AttestationNotSupported));
@@ -3572,7 +3627,7 @@ mod tests {
             // Must manually set to prior to the cert expiration.
             // Expiry is 2026-01-08T00:46:09Z
             // Set to: 2025-02-06
-            SystemTime::UNIX_EPOCH + Duration::from_secs(1738810009),
+            || Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(1738810009)),
         );
         debug!(?result);
         assert!(result.is_ok());
@@ -3627,7 +3682,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             true,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
 
         assert!(matches!(
@@ -3676,7 +3731,7 @@ mod tests {
             None,
             &RequestRegistrationExtensions::default(),
             true,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
 
         debug!(?result);
@@ -3741,7 +3796,7 @@ mod tests {
             None,
             &reg_extn,
             true,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
 
         debug!(?result);
@@ -3811,7 +3866,7 @@ mod tests {
             None,
             &reg_extn,
             true,
-            SystemTime::now(),
+            || Ok(SystemTime::now()),
         );
 
         debug!(?result);

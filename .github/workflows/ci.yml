@@ -97,7 +97,10 @@ jobs:
     # target a Cloudflare Worker runs this crate on, where std's clock panics
     # (kanidm/webauthn-rs issue 447). src/time.rs reads Date.now() there and
     # refuses a broken reading; only this job proves it runs. The runner runs
-    # only wasm_bindgen_test functions.
+    # only wasm_bindgen_test functions, so it does not reach time::now()'s
+    # callers: the clippy step guards those, since clippy.toml in
+    # webauthn-rs-core and webauthn-rs disallows std's SystemTime::now and
+    # Instant::now and -D warnings fails any new call.
     name: webauthn-rs-core on wasm32 (Node)
     runs-on: ubuntu-latest
     steps:

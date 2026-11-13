@@ -6,9 +6,17 @@
 //! read from JavaScript's `Date.now()`, the clock a Cloudflare Worker or a
 //! browser gives. A reading that is not a number of milliseconds since the
 //! epoch, or that falls before [`EARLIEST`], is refused with
-//! [`WebauthnError::ClockUnavailable`] rather than read as 1970, so a broken
-//! clock fails the ceremony instead of verifying certificates against the
-//! wrong day.
+//! [`WebauthnError::ClockUnavailable`] rather than read as 1970. A 1970
+//! reading already failed closed, since no certificate is valid then, so the
+//! refusal turns a silent wrong reading into a clear error; it does not bound
+//! a clock that runs ahead. The clock is read only where a certificate chain
+//! is checked against a CA list, so a registration with none never reads it.
+//!
+//! The floor applies on every target, native included: a host whose clock
+//! reads before 2025 now gets `ClockUnavailable` where upstream would go
+//! ahead. That, and the new `ClockUnavailable` variant on the exhaustive
+//! `WebauthnError` at the same version, differ from upstream; weigh both when
+//! rebasing onto it.
 //!
 //! An interim for kanidm/webauthn-rs PR 607, which moves this to
 //! `crypto_glue::time` once kanidm/crypto-glue PR 48 is released.
@@ -28,6 +36,7 @@ const MAX_SAFE_MILLIS: f64 = 9_007_199_254_740_991.0;
 
 /// The current time, or [`WebauthnError::ClockUnavailable`].
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[allow(clippy::disallowed_methods)] // the one native read of std's clock, never built for wasm32
 pub(crate) fn now() -> WebauthnResult<SystemTime> {
     after_earliest(SystemTime::now())
 }
