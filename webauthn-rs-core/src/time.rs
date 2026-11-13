@@ -133,6 +133,17 @@ mod tests {
             from_unix_millis(EARLIEST as f64 * 1000.0 + 1.75),
             Ok(earliest + Duration::from_millis(1))
         );
-        assert!(from_unix_millis(MAX_SAFE_MILLIS).is_ok());
+        // 2100-01-01T00:00:00Z, inside every platform's SystemTime.
+        assert_eq!(
+            from_unix_millis(4_102_444_800_000.0),
+            Ok(UNIX_EPOCH + Duration::from_secs(4_102_444_800))
+        );
+        // The largest reading is taken where SystemTime can hold it and
+        // refused where it cannot (Windows stops near the year 30828), and
+        // never panics.
+        match from_unix_millis(MAX_SAFE_MILLIS) {
+            Ok(time) => assert!(time > earliest),
+            Err(e) => assert_eq!(e, WebauthnError::ClockUnavailable),
+        }
     }
 }
