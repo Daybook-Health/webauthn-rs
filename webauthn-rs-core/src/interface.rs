@@ -360,7 +360,7 @@ impl Credential {
         &'_ self,
         ca_list: &'a AttestationCaList,
     ) -> Result<Option<&'a AttestationCa>, WebauthnError> {
-        let current_time = crate::time::now();
+        let current_time = crate::time::now()?;
         verify_attestation_ca_chain(&self.attestation.data, ca_list, current_time)
     }
 }

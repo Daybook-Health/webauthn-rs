@@ -1,0 +1,13 @@
+# The workspace's clippy.toml, which this file replaces for this crate
+# (clippy reads the nearest one and does not merge them).
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+
+# std's clock panics on wasm32-unknown-unknown (kanidm/webauthn-rs issue 447),
+# where a Cloudflare Worker runs this crate. Read the time through
+# webauthn-rs-core's `time::now()`, which reads Date.now() there. The wasm32
+# clippy step in CI runs with -D warnings, so a new call fails it.
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "panics on wasm32-unknown-unknown; use webauthn-rs-core's time::now()" },
+    { path = "std::time::Instant::now", reason = "panics on wasm32-unknown-unknown" },
+]
